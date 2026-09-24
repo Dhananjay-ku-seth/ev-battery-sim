@@ -73,6 +73,9 @@ export default function App() {
   const [presetId, setPresetId] = useState<PresetId>("healthy");
   const [cells, setCells] = useState<CellParams[]>(() => PRESETS[0].cells.map((c) => ({ ...c })));
   const [pack, setPack] = useState<PackState>(() => initPack(PRESETS[0].initialSoc, PRESETS[0].ambientTemp));
+  // Latest pack state, readable inside the animation loop so updates stay free of side effects.
+  const packRef = useRef<PackState>(pack);
+  packRef.current = pack;
   const [mode, setMode] = useState<Mode>("idle");
   const [cRate, setCRate] = useState(0.5);
   const [ambientTemp, setAmbientTemp] = useState(PRESETS[0].ambientTemp);
@@ -96,19 +99,18 @@ export default function App() {
       lastFrameRef.current = now;
       const dt = (realDeltaMs / 1000) * speed;
 
-      setPack((prev) => {
-        const effectiveMode: Mode = bmsTripped ? "idle" : mode;
-        const next = stepPack(prev, cells, effectiveMode, cRate, ambientTemp, dt);
-        if (next.temp > BMS_TRIP_TEMP && !bmsTripped) setBmsTripped(true);
-        else if (bmsTripped && next.temp < 55) setBmsTripped(false);
+      const effectiveMode: Mode = bmsTripped ? "idle" : mode;
+      const next = stepPack(packRef.current, cells, effectiveMode, cRate, ambientTemp, dt);
+      packRef.current = next;
+      setPack(next);
+      if (next.temp > BMS_TRIP_TEMP && !bmsTripped) setBmsTripped(true);
+      else if (bmsTripped && next.temp < 55) setBmsTripped(false);
 
-        if (now - lastSampleRef.current > 150) {
-          lastSampleRef.current = now;
-          const avgSoc = next.cellSoc.reduce((s, x) => s + x, 0) / next.cellSoc.length;
-          historyRef.current = [...historyRef.current, { soc: avgSoc, temp: next.temp }].slice(-400);
-        }
-        return next;
-      });
+      if (now - lastSampleRef.current > 150) {
+        lastSampleRef.current = now;
+        const avgSoc = next.cellSoc.reduce((s, x) => s + x, 0) / next.cellSoc.length;
+        historyRef.current = [...historyRef.current, { soc: avgSoc, temp: next.temp }].slice(-400);
+      }
       forceTick((n) => n + 1);
       raf = requestAnimationFrame(loop);
     };
@@ -145,11 +147,11 @@ export default function App() {
       const next = cs.map((c, idx) => idx === i ? { capacityAh: c.capacityAh * 0.7, r: c.r * 2 } : c);
       return next;
     });
-    setPack((p) => {
-      const i = Math.floor(Math.random() * p.cellSoc.length);
-      const nextSoc = p.cellSoc.map((s, idx) => idx === i ? Math.min(1, s + 0.12) : s);
-      return { ...p, cellSoc: nextSoc };
-    });
+    const p = packRef.current;
+    const hit = Math.floor(Math.random() * p.cellSoc.length);
+    const bumped = { ...p, cellSoc: p.cellSoc.map((s, idx) => idx === hit ? Math.min(1, s + 0.12) : s) };
+    packRef.current = bumped;
+    setPack(bumped);
   }
 
   const current = packCurrent(cells, bmsTripped ? "idle" : mode, cRate, pack.cellSoc);
@@ -164,7 +166,7 @@ export default function App() {
   if (avgSoc < 0.05) alerts.push({ text: "Low SoC — pack nearly empty", level: "warn" });
   if (avgSoc > 0.98 && mode === "charge") alerts.push({ text: "Pack full — stop charging", level: "warn" });
   if (spreadMv > 40) alerts.push({ text: `Cell imbalance detected (${spreadMv.toFixed(0)} mV spread) — switch to Idle to balance`, level: "warn" });
-  if (Math.max(...cellVoltages) > 4.25) alerts.push({ text: "Cell overvoltage — charge current tapering (CC→CV)", level: "warn" });
+  if (Math.max(...cellVoltages) > 4.25) alerts.push({ text: "Cell voltage above 4.25 V while charging (includes the I·R drop) — lower the C-rate. The charger only tapers above 90% SoC", level: "warn" });
 
   const preset = PRESETS.find((p) => p.id === presetId)!;
 
